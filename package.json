@@ -1,0 +1,16 @@
+{
+  "name": "ct-tcg-restock-tracker",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Connecticut Pokémon + One Piece TCG retail restock tracker — inventory provenance core",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node scripts/check-syntax.mjs",
+    "test": "node --test \"test/**/*.test.js\"",
+    "verify": "npm run check && npm test",
+    "test:db": "node scripts/test-db.mjs"
+  }
+}
