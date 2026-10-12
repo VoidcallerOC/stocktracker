@@ -20,7 +20,16 @@ select json_build_object(
       'id', id, 'importKey', import_key, 'displayName', display_name, 'kind', kind,
       'retailerId', retailer_id, 'publicWebsite', public_website,
       'verificationStatus', verification_status, 'verifiedAt', verified_at,
-      'reviewNote', review_note, 'isSynthetic', is_synthetic
+      'reviewNote', review_note, 'isSynthetic', is_synthetic,
+      'evidence', coalesce((
+        select json_agg(json_build_object(
+          'sourceLabel', e.source_label, 'sourceUrl', e.source_url, 'fieldScope', e.field_scope,
+          'verificationStatus', e.verification_status, 'observedAt', e.observed_at,
+          'note', e.note, 'claimKey', e.claim_key
+        ) order by e.field_scope, e.claim_key, e.source_label, e.observed_at)
+        from record_evidence e
+        where e.subject_type = 'business' and e.subject_id = businesses.id
+      ), '[]'::json)
     )) from businesses), '[]'::json),
   'stores', coalesce((
     select json_agg(json_build_object(
@@ -34,7 +43,16 @@ select json_build_object(
       'verificationStatus', s.verification_status, 'verifiedAt', s.verified_at,
       'recordStatus', s.record_status, 'retiredReason', s.retired_reason,
       'successorImportKey', succ.import_key, 'reviewNote', s.review_note, 'isSynthetic', s.is_synthetic,
-      'games', coalesce((select json_agg(g.game_id order by g.game_id) from store_game_support g where g.store_id = s.id), '[]'::json)
+      'games', coalesce((select json_agg(g.game_id order by g.game_id) from store_game_support g where g.store_id = s.id), '[]'::json),
+      'evidence', coalesce((
+        select json_agg(json_build_object(
+          'sourceLabel', e.source_label, 'sourceUrl', e.source_url, 'fieldScope', e.field_scope,
+          'verificationStatus', e.verification_status, 'observedAt', e.observed_at,
+          'note', e.note, 'claimKey', e.claim_key
+        ) order by e.field_scope, e.claim_key, e.source_label, e.observed_at)
+        from record_evidence e
+        where e.subject_type = 'store' and e.subject_id = s.id
+      ), '[]'::json)
     ))
     from stores s
     left join businesses b on b.id = s.business_id
@@ -52,7 +70,16 @@ select json_build_object(
           'idType', i.id_type, 'retailerId', i.retailer_id, 'value', i.value,
           'verificationStatus', i.verification_status, 'verifiedAt', i.verified_at,
           'verificationSource', i.verification_source
-        )) from product_identifiers i where i.product_id = p.id), '[]'::json)
+        )) from product_identifiers i where i.product_id = p.id), '[]'::json),
+      'evidence', coalesce((
+        select json_agg(json_build_object(
+          'sourceLabel', e.source_label, 'sourceUrl', e.source_url, 'fieldScope', e.field_scope,
+          'verificationStatus', e.verification_status, 'observedAt', e.observed_at,
+          'note', e.note, 'claimKey', e.claim_key
+        ) order by e.field_scope, e.claim_key, e.source_label, e.observed_at)
+        from record_evidence e
+        where e.subject_type = 'product' and e.subject_id = p.id
+      ), '[]'::json)
     )) from products p), '[]'::json)
 )::text;
 `;
@@ -83,26 +110,45 @@ function assertLocal(url) {
 function readInput(path) {
   const text = readFileSync(path, "utf8");
   if (path.endsWith(".csv")) return csvToDirectory(text);
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`invalid JSON: ${error.message}`);
+  }
+}
+
+function hydrateEvidence(row) {
+  row.evidence ??= [];
+  for (const item of row.evidence) {
+    if (item.observedAt != null) item.observedAt = normTime(item.observedAt);
+    item.claimKey = item.claimKey || null;
+    item.sourceUrl = item.sourceUrl || null;
+    item.note = item.note || null;
+  }
 }
 
 function hydrate(existing) {
   const stamp = (row, field) => {
     if (row[field] != null) row[field] = normTime(row[field]);
   };
-  for (const row of existing.businesses ?? []) stamp(row, "verifiedAt");
+  for (const row of existing.businesses ?? []) {
+    stamp(row, "verifiedAt");
+    hydrateEvidence(row);
+  }
   for (const row of existing.stores ?? []) {
     stamp(row, "verifiedAt");
     stamp(row, "locationVerifiedAt");
     if (row.latitude != null) row.latitude = Number(row.latitude);
     if (row.longitude != null) row.longitude = Number(row.longitude);
     row.games ??= [];
+    hydrateEvidence(row);
   }
   for (const row of existing.products ?? []) {
     stamp(row, "verifiedAt");
     if (row.releaseDate != null) row.releaseDate = String(row.releaseDate).slice(0, 10);
     row.identifiers ??= [];
     for (const identifier of row.identifiers) stamp(identifier, "verifiedAt");
+    hydrateEvidence(row);
   }
   return existing;
 }
@@ -149,9 +195,23 @@ if (!inputPath) {
   console.error("--input is required");
   process.exit(1);
 }
+let inputDocument;
+try {
+  inputDocument = readInput(inputPath);
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
 const existingPath = argValue(argv, "--existing");
 let existing = { businesses: [], stores: [], products: [] };
-if (existingPath) existing = hydrate(JSON.parse(readFileSync(existingPath, "utf8")));
+if (existingPath) {
+  try {
+    existing = hydrate(JSON.parse(readFileSync(existingPath, "utf8")));
+  } catch (error) {
+    console.error(`invalid existing snapshot: ${error.message}`);
+    process.exit(1);
+  }
+}
 if (argv.includes("--database")) {
   const url = databaseUrl();
   if (!url) {
@@ -161,7 +221,7 @@ if (argv.includes("--database")) {
   existing = loadDatabase(url);
 }
 
-const plan = planImport(readInput(inputPath), existing);
+const plan = planImport(inputDocument, existing);
 if (dryRun) {
   const body = report("dry-run", plan);
   process.exit(body.ok ? 0 : 2);
@@ -174,7 +234,7 @@ if (!url) {
 }
 assertLocal(url);
 const live = existingPath || argv.includes("--database") ? existing : loadDatabase(url);
-const livePlan = existingPath || argv.includes("--database") ? plan : planImport(readInput(inputPath), live);
+const livePlan = existingPath || argv.includes("--database") ? plan : planImport(inputDocument, live);
 const body = report("apply", livePlan);
 if (!livePlan.ok) process.exit(2);
 

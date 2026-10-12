@@ -101,6 +101,13 @@ function validateEvidenceList(errors, evidence, { rowStatus }) {
       if (!validHttpUrl(sourceUrl)) err(errors, `${prefix}.sourceUrl must be an http(s) URL`);
     }
     const note = item.note == null ? null : collapseWs(item.note);
+    let claimKey = item.claimKey == null ? null : String(item.claimKey).trim();
+    if (claimKey === "") claimKey = null;
+    if (item.fieldScope === "identifier" && !claimKey) {
+      err(errors, `${prefix}.claimKey is required for identifier evidence`);
+    } else if (item.fieldScope !== "identifier" && claimKey) {
+      err(errors, `${prefix}.claimKey is only allowed for identifier evidence`);
+    }
     return {
       sourceLabel,
       fieldScope: item.fieldScope,
@@ -108,17 +115,19 @@ function validateEvidenceList(errors, evidence, { rowStatus }) {
       observedAt,
       sourceUrl,
       note,
+      claimKey,
     };
   }).filter(Boolean);
 }
 
-function hasEvidence(evidence, { scope, status } = {}) {
+function hasEvidence(evidence, { scope, status, claimKey } = {}) {
   return evidence.some((item) => {
     if (scope === "address") {
       if (item.fieldScope !== "address" && item.fieldScope !== "record") return false;
     } else if (scope && item.fieldScope !== scope) {
       return false;
     }
+    if (claimKey != null && (item.claimKey ?? null) !== claimKey) return false;
     if (status === "VERIFIED") return item.verificationStatus === "VERIFIED";
     if (status === "PARTIAL") return item.verificationStatus === "PARTIAL" || item.verificationStatus === "VERIFIED";
     return item.verificationStatus === "PARTIAL" || item.verificationStatus === "VERIFIED";
@@ -128,8 +137,8 @@ function hasEvidence(evidence, { scope, status } = {}) {
 function validateClaimStrength(errors, { status, verifiedAt, evidence }) {
   if (status === "VERIFIED" || status === "PARTIAL") {
     if (!normTime(verifiedAt)) err(errors, `${status} requires verifiedAt`);
-    if (!hasEvidence(evidence, { status })) {
-      err(errors, `${status} requires evidence with status ${status === "VERIFIED" ? "VERIFIED" : "PARTIAL or VERIFIED"}`);
+    if (!hasEvidence(evidence, { scope: "record", status })) {
+      err(errors, `${status} requires record evidence with status ${status === "VERIFIED" ? "VERIFIED" : "PARTIAL or VERIFIED"}`);
     }
   }
   if (status === "BLOCKED") {
@@ -289,7 +298,7 @@ export function validateProduct(input) {
   };
 }
 
-function validateIdentifiers(errors, identifiers, { evidence }) {
+function validateIdentifiers(errors, identifiers, { evidence, rowStatus }) {
   if (!Array.isArray(identifiers)) {
     err(errors, "identifiers must be an array");
     return [];
@@ -324,11 +333,18 @@ function validateIdentifiers(errors, identifiers, { evidence }) {
     if ((item.verificationStatus === "PARTIAL" || item.verificationStatus === "VERIFIED") && !normTime(item.verifiedAt)) {
       err(errors, `${prefix}.verifiedAt is required`);
     }
+    if (item.verificationStatus === "VERIFIED" && rowStatus !== "VERIFIED") {
+      err(errors, `${prefix} cannot be stronger than the product`);
+    } else if (item.verificationStatus === "PARTIAL" && rowStatus !== "PARTIAL" && rowStatus !== "VERIFIED") {
+      err(errors, `${prefix} cannot be stronger than the product`);
+    }
+    const identifierValue = typeof item.value === "string" ? item.value.trim() : item.value;
     if (!hasEvidence(evidence, {
       scope: "identifier",
       status: item.verificationStatus === "VERIFIED" ? "VERIFIED" : "PARTIAL",
+      claimKey: identifierValue,
     })) {
-      err(errors, `${prefix} requires identifier evidence`);
+      err(errors, `${prefix} requires identifier evidence for this value`);
     }
     return {
       idType,
@@ -399,6 +415,11 @@ export function validateStore(input) {
     verifiedAt: input.verifiedAt,
     evidence,
   });
+  if (input.verificationStatus === "VERIFIED"
+    && addressStatus !== "PARTIAL"
+    && addressStatus !== "VERIFIED") {
+    err(errors, "VERIFIED store requires address verification");
+  }
   if ((addressStatus === "PARTIAL" || addressStatus === "VERIFIED")
     && !hasEvidence(evidence, { scope: "address", status: addressStatus })) {
     err(errors, "address verification requires address evidence");

@@ -83,29 +83,57 @@ function identifierKey(item) {
   return [item.idType, item.retailerId ?? "", item.value, item.verificationStatus].join("|");
 }
 
+function identifierOwnerKey(item) {
+  return [item.idType, item.retailerId ?? "", item.value].join("|");
+}
+
+function evidenceKey(item) {
+  return JSON.stringify([
+    item.fieldScope ?? null,
+    item.claimKey ?? null,
+    item.sourceLabel ?? null,
+    item.sourceUrl ?? null,
+    item.verificationStatus ?? null,
+    item.observedAt ?? null,
+    item.note ?? null,
+  ]);
+}
+
+function evidenceAdditions(before, after) {
+  const have = new Set((before.evidence ?? []).map(evidenceKey));
+  return (after.evidence ?? []).some((item) => !have.has(evidenceKey(item)));
+}
+
 function productContentChanged(before, after) {
   return changedFields(before, after, PRODUCT_IDENTITY_FIELDS)
     .concat((before.reviewNote ?? null) !== (after.reviewNote ?? null) ? ["reviewNote"] : [])
-    .concat(sameList(before.identifiers, after.identifiers, identifierKey) ? [] : ["identifiers"]);
+    .concat(sameList(before.identifiers, after.identifiers, identifierKey) ? [] : ["identifiers"])
+    .concat(evidenceAdditions(before, after) ? ["evidence"] : []);
 }
 
 function storeContentChanged(before, after) {
   return changedFields(before, after, STORE_IDENTITY_FIELDS)
     .concat((before.reviewNote ?? null) !== (after.reviewNote ?? null) ? ["reviewNote"] : [])
-    .concat(sameList(before.games, after.games, (game) => game) ? [] : ["games"]);
+    .concat(sameList(before.games, after.games, (game) => game) ? [] : ["games"])
+    .concat(evidenceAdditions(before, after) ? ["evidence"] : []);
 }
 
 function businessContentChanged(before, after) {
   return changedFields(before, after, BUSINESS_IDENTITY_FIELDS)
-    .concat((before.reviewNote ?? null) !== (after.reviewNote ?? null) ? ["reviewNote"] : []);
+    .concat((before.reviewNote ?? null) !== (after.reviewNote ?? null) ? ["reviewNote"] : [])
+    .concat(evidenceAdditions(before, after) ? ["evidence"] : []);
 }
 
 function classify(kind, incoming, before, changed) {
   if (!before) return { op: "insert", resolution: null };
   if (changed.length === 0) return { op: "unchanged", resolution: null };
-  const identityChanged = changed.some((field) => field !== "reviewNote");
+  const identityChanged = changed.some((field) => field !== "reviewNote" && field !== "evidence");
   if (before.verificationStatus === "VERIFIED" && identityChanged) {
-    const retiring = kind === "store" && incoming.recordStatus === "retired" && incoming.resolution === "retire";
+    const retireFields = new Set(["recordStatus", "retiredReason", "successorImportKey", "reviewNote", "evidence"]);
+    const retiring = kind === "store"
+      && incoming.recordStatus === "retired"
+      && incoming.resolution === "retire"
+      && changed.every((field) => retireFields.has(field));
     if (retiring) return { op: "update", resolution: "retire" };
     if (incoming.resolution === "accept_incoming") return { op: "update", resolution: "accept_incoming" };
     return { op: "conflict", resolution: null };
@@ -162,9 +190,25 @@ export function planImport(input, existing = {}) {
   const products = takeValid(input.products, validateProduct, "product", rejected);
 
   const businessKeys = new Set(prior.businesses.map((row) => row.importKey).concat(businesses.map((row) => row.importKey)));
+  const knownStores = new Map();
+  for (const row of prior.stores) knownStores.set(row.importKey, row);
+  for (const row of stores) knownStores.set(row.importKey, row);
   for (const store of stores) {
     if (store.businessImportKey && !businessKeys.has(store.businessImportKey)) {
       pushRejected(rejected, "store", store.importKey, ["businessImportKey does not match a business in the document or the existing directory"]);
+    }
+    if (!store.successorImportKey) continue;
+    if (store.successorImportKey === store.importKey) {
+      pushRejected(rejected, "store", store.importKey, ["successorImportKey cannot reference the same store"]);
+      continue;
+    }
+    const target = knownStores.get(store.successorImportKey);
+    if (!target || target.importKey === store.importKey) {
+      pushRejected(rejected, "store", store.importKey, ["successorImportKey does not match a store in the document or the existing directory"]);
+      continue;
+    }
+    if ((target.recordStatus ?? "active") !== "active") {
+      pushRejected(rejected, "store", store.importKey, ["successorImportKey cannot reference a retired store"]);
     }
   }
   const rejectedKeys = new Set(rejected.map((row) => `${row.kind}:${row.importKey}`));
@@ -184,7 +228,11 @@ export function planImport(input, existing = {}) {
     branchOwners.set(storeBranchKey(row), row.importKey ?? row.id ?? "existing");
   }
   const productOwners = new Map();
-  for (const row of prior.products) productOwners.set(productIdentityKey(row), row.importKey ?? row.id ?? "existing");
+  const identifierOwners = new Map();
+  for (const row of prior.products) {
+    productOwners.set(productIdentityKey(row), row.importKey ?? row.id ?? "existing");
+    for (const item of row.identifiers ?? []) identifierOwners.set(identifierOwnerKey(item), row.importKey ?? row.id ?? "existing");
+  }
 
   for (const row of plannedBusinesses) {
     const before = businessByKey.get(row.importKey) ?? null;
@@ -233,6 +281,22 @@ export function planImport(input, existing = {}) {
       addIdentityConflict(conflicts, "product", row.importKey, owner, identity);
       continue;
     }
+    let identifierConflict = false;
+    for (const item of row.identifiers ?? []) {
+      const key = identifierOwnerKey(item);
+      const identifierOwner = identifierOwners.get(key);
+      if (identifierOwner && identifierOwner !== row.importKey) {
+        conflicts.push({
+          kind: "product",
+          importKey: row.importKey,
+          conflictsWith: identifierOwner,
+          identity: key,
+          reason: "identifier already belongs to another product",
+        });
+        identifierConflict = true;
+      }
+    }
+    if (identifierConflict) continue;
     const changed = before ? productContentChanged(before, row) : [];
     const decision = classify("product", row, before, changed);
     if (decision.op === "conflict") {
@@ -245,6 +309,7 @@ export function planImport(input, existing = {}) {
       continue;
     }
     productOwners.set(identity, row.importKey);
+    for (const item of row.identifiers ?? []) identifierOwners.set(identifierOwnerKey(item), row.importKey);
     actions.push({ kind: "product", op: decision.op, importKey: row.importKey, resolution: decision.resolution, row });
   }
 
@@ -294,12 +359,25 @@ export function parseCsv(text) {
       cell = "";
     } else if (char !== "\r") cell += char;
   }
+  if (inQuotes) throw new Error("CSV quote is not closed");
   if (cell.length || row.length) {
     row.push(cell);
     rows.push(row);
   }
   return rows.filter((columns) => columns.some((column) => column.trim() !== ""));
 }
+
+const CSV_COLUMNS = new Set([
+  "record_type", "import_key", "display_name", "kind", "retailer_id", "public_website",
+  "name", "address_line", "city", "state", "zip", "latitude", "longitude", "location_source",
+  "location_verified_at", "official_url", "public_phone", "address_verification_status",
+  "coordinate_verification_status", "store_format", "game", "category", "canonical_name",
+  "set_name", "language", "region", "packaging_variant", "release_date", "lifecycle_status",
+  "official_reference_url", "verification_status", "verified_at", "is_synthetic", "review_note",
+  "business_import_key", "games", "record_status", "retired_reason", "successor_import_key",
+  "resolution", "evidence_source_label", "evidence_source_url", "evidence_field_scope",
+  "evidence_status", "evidence_observed_at", "evidence_note",
+]);
 
 function csvValue(raw) {
   const value = raw?.trim() ?? "";
@@ -323,6 +401,14 @@ export function csvToDirectory(text) {
   const table = parseCsv(text);
   if (!table.length) return { businesses: [], stores: [], products: [] };
   const header = table[0].map((column) => column.trim());
+  const seenHeaders = new Set();
+  const unknown = [];
+  for (const column of header) {
+    if (!column || !CSV_COLUMNS.has(column)) unknown.push(column || "(blank)");
+    if (seenHeaders.has(column)) throw new Error(`duplicate CSV column: ${column || "(blank)"}`);
+    seenHeaders.add(column);
+  }
+  if (unknown.length) throw new Error(`unknown CSV columns: ${unknown.join(", ")}`);
   const records = table.slice(1).map((columns) => {
     const record = {};
     header.forEach((key, index) => {
@@ -335,11 +421,15 @@ export function csvToDirectory(text) {
   const products = [];
   for (const record of records) {
     const type = csvValue(record.record_type);
+    const syntheticText = record.is_synthetic == null ? "" : String(record.is_synthetic).trim();
+    if (syntheticText !== "true" && syntheticText !== "false") {
+      throw new Error(`is_synthetic must be true or false for ${csvValue(record.import_key) ?? "a CSV row"}`);
+    }
     const shared = {
       importKey: csvValue(record.import_key),
       verificationStatus: csvValue(record.verification_status),
       verifiedAt: csvValue(record.verified_at),
-      isSynthetic: csvValue(record.is_synthetic) === "true",
+      isSynthetic: syntheticText === "true",
       reviewNote: csvValue(record.review_note),
       evidence: csvEvidence(record),
       resolution: csvValue(record.resolution),

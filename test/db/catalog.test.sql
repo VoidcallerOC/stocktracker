@@ -103,6 +103,7 @@ values
 update stores
 set verification_status = 'VERIFIED',
     verified_at = now(),
+    address_verification_status = 'VERIFIED',
     coordinate_verification_status = 'PARTIAL'
 where id = '00000000-0000-0000-0000-0000000000c2';
 commit;

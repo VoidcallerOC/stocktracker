@@ -17,12 +17,26 @@ function setResolution(resolution) {
 }
 
 function evidenceSql(subjectType, importKey, evidence, isSynthetic) {
+  const table = subjectType === "product" ? "products" : subjectType === "store" ? "stores" : "businesses";
   return (evidence ?? []).map((item) => `insert into record_evidence
-  (subject_type, subject_id, field_scope, source_label, source_url, verification_status, observed_at, note, is_synthetic)
-select ${quote(subjectType)}, id, ${quote(item.fieldScope)}, ${quote(item.sourceLabel)}, ${quote(item.sourceUrl)},
-  ${quote(item.verificationStatus)}, ${quote(item.observedAt)}::timestamptz, ${quote(item.note)}, ${quote(isSynthetic)}
-from ${subjectType === "product" ? "products" : subjectType === "store" ? "stores" : "businesses"}
-where import_key = ${quote(importKey)};`).join("\n");
+  (subject_type, subject_id, field_scope, claim_key, source_label, source_url, verification_status, observed_at, note, is_synthetic)
+select ${quote(subjectType)}, subject.id, ${quote(item.fieldScope)}, ${quote(item.claimKey ?? null)}, ${quote(item.sourceLabel)},
+  ${quote(item.sourceUrl)}, ${quote(item.verificationStatus)}, ${quote(item.observedAt)}::timestamptz, ${quote(item.note)},
+  ${quote(isSynthetic)}
+from ${table} subject
+where subject.import_key = ${quote(importKey)}
+  and not exists (
+    select 1 from record_evidence existing
+    where existing.subject_type = ${quote(subjectType)}
+      and existing.subject_id = subject.id
+      and existing.field_scope = ${quote(item.fieldScope)}
+      and existing.claim_key is not distinct from ${quote(item.claimKey ?? null)}
+      and existing.source_label = ${quote(item.sourceLabel)}
+      and existing.source_url is not distinct from ${quote(item.sourceUrl)}
+      and existing.verification_status = ${quote(item.verificationStatus)}
+      and existing.observed_at = ${quote(item.observedAt)}::timestamptz
+      and existing.note is not distinct from ${quote(item.note)}
+  );`).join("\n");
 }
 
 function productInsert(row) {
@@ -53,17 +67,41 @@ where import_key = ${quote(row.importKey)};`);
 }
 
 function identifierSql(row) {
-  return (row.identifiers ?? []).map((item) => `insert into product_identifiers (
-  product_id, id_type, retailer_id, value, verification_status, verified_at, verification_source
-) select id, ${quote(item.idType)}, ${quote(item.retailerId)}, ${quote(item.value)},
-  ${quote(item.verificationStatus)}, ${quote(item.verifiedAt)}::timestamptz, ${quote(item.verificationSource)}
-from products where import_key = ${quote(row.importKey)}
-and not exists (
-  select 1 from product_identifiers existing
+  return (row.identifiers ?? []).map((item) => `do $identifier$
+declare
+  product uuid;
+  owner uuid;
+begin
+  select id into product from products where import_key = ${quote(row.importKey)};
+  if product is null then
+    raise exception 'product % is missing for identifier', ${quote(row.importKey)};
+  end if;
+  select product_id into owner from product_identifiers existing
   where existing.id_type = ${quote(item.idType)}
     and coalesce(existing.retailer_id, '') = coalesce(${quote(item.retailerId)}, '')
-    and existing.value = ${quote(item.value)}
-);`).join("\n");
+    and existing.value = ${quote(item.value)};
+  if owner is not null and owner <> product then
+    raise exception 'identifier already belongs to another product';
+  end if;
+  if owner is null then
+    insert into product_identifiers (
+      product_id, id_type, retailer_id, value, verification_status, verified_at, verification_source
+    ) values (
+      product, ${quote(item.idType)}, ${quote(item.retailerId)}, ${quote(item.value)},
+      ${quote(item.verificationStatus)}, ${quote(item.verifiedAt)}::timestamptz, ${quote(item.verificationSource)}
+    );
+  else
+    update product_identifiers set
+      verification_status = ${quote(item.verificationStatus)},
+      verified_at = ${quote(item.verifiedAt)}::timestamptz,
+      verification_source = ${quote(item.verificationSource)}
+    where product_id = product
+      and id_type = ${quote(item.idType)}
+      and coalesce(retailer_id, '') = coalesce(${quote(item.retailerId)}, '')
+      and value = ${quote(item.value)};
+  end if;
+end
+$identifier$;`).join("\n");
 }
 
 function productUpdate(row, resolution) {
@@ -160,9 +198,39 @@ where import_key = ${quote(row.importKey)};`);
 }
 
 function gameSql(row) {
-  return (row.games ?? []).map((game) => `insert into store_game_support (store_id, game_id)
+  const games = row.games ?? [];
+  const arraySql = games.length
+    ? `array[${games.map((game) => quote(game)).join(", ")}]::text[]`
+    : "array[]::text[]";
+  const remove = `delete from store_game_support
+where store_id = (select id from stores where import_key = ${quote(row.importKey)})
+  and not (game_id = any (${arraySql}));`;
+  const inserts = games.map((game) => `insert into store_game_support (store_id, game_id)
 select id, ${quote(game)} from stores where import_key = ${quote(row.importKey)}
 on conflict do nothing;`).join("\n");
+  return [remove, inserts].filter(Boolean).join("\n");
+}
+
+function successorSql(row) {
+  return `do $successor$
+declare
+  target uuid;
+  current_id uuid;
+begin
+  select id into current_id from stores where import_key = ${quote(row.importKey)};
+  select id into target from stores where import_key = ${quote(row.successorImportKey)};
+  if target is null then
+    raise exception 'successor store % is missing', ${quote(row.successorImportKey)};
+  end if;
+  if target is not distinct from current_id then
+    raise exception 'successor store cannot be the same store';
+  end if;
+  if (select record_status from stores where id = target) is distinct from 'active' then
+    raise exception 'successor store cannot be retired';
+  end if;
+  update stores set successor_store_id = target where id = current_id;
+end
+$successor$;`;
 }
 
 function storeUpdate(row, resolution) {
@@ -192,9 +260,7 @@ update stores set
   review_note = ${quote(row.reviewNote)},
   is_synthetic = ${quote(row.isSynthetic)}
 where import_key = ${quote(row.importKey)};
-${gameSql(row)}
-${row.successorImportKey ? `update stores set successor_store_id = (select id from stores where import_key = ${quote(row.successorImportKey)})
-where import_key = ${quote(row.importKey)};` : ""}`;
+${gameSql(row)}`;
 }
 
 export function renderApplySql(plan) {
@@ -211,11 +277,8 @@ export function renderApplySql(plan) {
     else if (action.kind === "product" && action.op === "insert") chunks.push(productInsert(action.row));
     else chunks.push(productUpdate(action.row, action.resolution));
   }
-  const successors = sorted.filter((action) => action.kind === "store" && action.op === "insert" && action.row.successorImportKey);
-  for (const action of successors) {
-    chunks.push(`update stores set successor_store_id = (select id from stores where import_key = ${quote(action.row.successorImportKey)})
-where import_key = ${quote(action.row.importKey)};`);
-  }
+  const successors = sorted.filter((action) => action.kind === "store" && action.row.successorImportKey);
+  for (const action of successors) chunks.push(successorSql(action.row));
   chunks.push("commit;");
   return `${chunks.join("\n")}\n`;
 }
