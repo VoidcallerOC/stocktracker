@@ -16,12 +16,16 @@ Tracks retail restock observations for sealed **Pokémon TCG** and **One Piece C
 | `src/domain/community.js` | Community-report intake: validation, rate limit, duplicates, privacy-safe view |
 | `src/ingest/runner.js` | Adapter runner: gate, timeout, bounded backoff, circuit breaker, all-or-nothing batch writes |
 | `db/migrations/0001_init.sql` | Draft Postgres schema with constraints, append-only observations, synthetic-in-prod guard, RLS |
-| `docs/` | Phase 0 audit, source-access matrix |
+| `db/migrations/0003_store_directory_and_catalog.sql` | Store-directory and sealed-catalog claims, evidence, and public read views |
+| `src/domain/directory.js` | Validation for stores, businesses, and sealed products. Unknown facts stay null. |
+| `src/import/` | Dry-run planner and transactional apply SQL for directory/catalog files |
+| `docs/` | Phase 0 audit, source-access matrix, directory and catalog rules |
 
 ## Commands
 ```bash
 npm run verify                                       # syntax check + unit tests (no deps)
 TEST_DATABASE_URL=postgres://postgres@localhost:5432/scratch npm run test:db   # local throwaway DB only
+npm run import:directory -- --dry-run --input file.json
 ```
 `test:db` refuses any non-local database URL.
 

@@ -1,0 +1,26 @@
+{
+  "fixtureNotice": "SYNTHETIC TEST FIXTURE. Not a real product. Explicit resolution for a verified correction.",
+  "products": [
+    {
+      "importKey": "test-lock-product",
+      "game": "pokemon",
+      "category": "tin",
+      "canonicalName": "TEST Synthetic Locked Tin Accepted",
+      "language": "en",
+      "region": "US",
+      "lifecycleStatus": "unknown",
+      "verificationStatus": "VERIFIED",
+      "verifiedAt": "2026-01-15T00:00:00.000Z",
+      "isSynthetic": true,
+      "resolution": "accept_incoming",
+      "evidence": [
+        {
+          "sourceLabel": "synthetic conflict fixture",
+          "fieldScope": "record",
+          "verificationStatus": "VERIFIED",
+          "observedAt": "2026-01-15T00:00:00.000Z"
+        }
+      ]
+    }
+  ]
+}

@@ -15,3 +15,10 @@ Recorded from the PR #1 review on 2026-10-11. None of these is fixed yet. Each f
 
 ## Retailer gates (unchanged)
 Walmart is BLOCKED, Target is BLOCKED, GameStop is UNVERIFIED and Best Buy is PARTIAL. `canRunSource()` denies all four even when their enable flags are set. Holding an API key does not make a source VERIFIED. See `docs/SOURCE-ACCESS-MATRIX.md`.
+
+## Store directory and sealed catalog
+Migration `0003_store_directory_and_catalog.sql` and `docs/DIRECTORY-AND-CATALOG.md` add the claim model and import workflow. They do not add real Connecticut stores or real sealed products. The ZIP check accepts any Connecticut `06xxx` code; that is not statewide coverage. No city has been researched. A directory row is not stock and does not authorize a retailer API.
+
+Best Buy remains PARTIAL. Walmart and Target remain BLOCKED. GameStop remains UNVERIFIED. No catalog provider listed in the source-access matrix is enabled for import or redistribution.
+
+This branch does not include the unmerged public-read and retention migration. The seven items above are still open on this branch.

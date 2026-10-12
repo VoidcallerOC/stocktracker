@@ -1,0 +1,88 @@
+{
+  "fixtureNotice": "SYNTHETIC TEST FIXTURE. These are not real Connecticut businesses, addresses, or sealed products. No UPC is present because none was verified.",
+  "businesses": [
+    {
+      "importKey": "test-synthetic-banner",
+      "displayName": "TEST Synthetic Fixture Banner",
+      "kind": "chain_banner",
+      "retailerId": "bestbuy",
+      "verificationStatus": "UNVERIFIED",
+      "isSynthetic": true,
+      "evidence": []
+    },
+    {
+      "importKey": "test-synthetic-independent",
+      "displayName": "TEST Synthetic Fixture Shop",
+      "kind": "independent",
+      "verificationStatus": "UNVERIFIED",
+      "isSynthetic": true,
+      "evidence": []
+    }
+  ],
+  "stores": [
+    {
+      "importKey": "test-synthetic-bb-north",
+      "businessImportKey": "test-synthetic-banner",
+      "retailerId": "bestbuy",
+      "name": "TEST Synthetic Fixture North",
+      "addressLine": "10 Fixture Lane",
+      "city": "Fixtureville",
+      "state": "CT",
+      "zip": "06010",
+      "addressVerificationStatus": "UNVERIFIED",
+      "coordinateVerificationStatus": "UNVERIFIED",
+      "storeFormat": "big_box",
+      "games": ["pokemon", "one_piece"],
+      "verificationStatus": "UNVERIFIED",
+      "recordStatus": "active",
+      "isSynthetic": true,
+      "evidence": []
+    },
+    {
+      "importKey": "test-synthetic-bb-south",
+      "businessImportKey": "test-synthetic-banner",
+      "retailerId": "bestbuy",
+      "name": "TEST Synthetic Fixture South",
+      "addressLine": "20 Fixture Lane",
+      "city": "Fixtureville",
+      "state": "CT",
+      "zip": "06011",
+      "addressVerificationStatus": "UNVERIFIED",
+      "coordinateVerificationStatus": "UNVERIFIED",
+      "storeFormat": "big_box",
+      "games": ["pokemon"],
+      "verificationStatus": "UNVERIFIED",
+      "recordStatus": "active",
+      "isSynthetic": true,
+      "evidence": []
+    }
+  ],
+  "products": [
+    {
+      "importKey": "test-synthetic-etb",
+      "game": "pokemon",
+      "category": "elite_trainer_box",
+      "canonicalName": "TEST Synthetic Fixture Elite Trainer Box",
+      "language": "en",
+      "region": "US",
+      "lifecycleStatus": "unknown",
+      "verificationStatus": "UNVERIFIED",
+      "isSynthetic": true,
+      "identifiers": [],
+      "evidence": []
+    },
+    {
+      "importKey": "test-synthetic-starter",
+      "game": "one_piece",
+      "category": "starter_deck",
+      "canonicalName": "TEST Synthetic Fixture Starter Deck",
+      "language": "en",
+      "region": "US",
+      "lifecycleStatus": "unknown",
+      "verificationStatus": "UNVERIFIED",
+      "isSynthetic": true,
+      "identifiers": [],
+      "evidence": []
+    }
+  ]
+}
