@@ -10,7 +10,7 @@ import {
   SOURCE_TYPES,
   VERIFICATION_STATUS,
 } from "./constants.js";
-import { toMs } from "./freshness.js";
+import { MAX_FUTURE_SKEW_MS, toMs } from "./freshness.js";
 
 export class ObservationError extends Error {}
 
@@ -63,6 +63,15 @@ export function normalizeObservation(input) {
   if (toMs(input.receivedAt) === null) throw new ObservationError("bad receivedAt");
   if (input.sourceTimestamp != null && toMs(input.sourceTimestamp) === null) {
     throw new ObservationError("bad sourceTimestamp");
+  }
+  // A source clock ahead of receipt by more than the allowed skew is inconsistent:
+  // we cannot have received the payload before the source says it existed.
+  if (input.sourceTimestamp != null) {
+    const stated = toMs(input.sourceTimestamp);
+    const received = toMs(input.receivedAt);
+    if (stated !== null && received !== null && stated - received > MAX_FUTURE_SKEW_MS) {
+      throw new ObservationError("source timestamp is after receipt");
+    }
   }
 
   const verificationStatus =

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { evaluateAlert, withinCooldown, alertMessage } from "../src/domain/alerts.js";
 import { normalizeObservation as N } from "../src/domain/observations.js";
+import { SOURCE_POLICIES } from "../src/domain/source-policy.js";
 import { obs, T0, HOUR, MIN, iso, ENV_ON } from "./helpers.js";
 
 const feed = (h, availability, quantity, extra = {}) => N(obs({
@@ -88,6 +89,108 @@ test("a stale in-stock report cannot alert even though prior state was out of st
   const prev = feed(0, "out_of_stock", 0);
   const late = feed(1, "in_stock", 2);
   assert.equal(ev(late, [prev], T0 + 4 * HOUR).qualifies, false);
+});
+
+test("unknown-age data does not alert unless that source policy explicitly allows it", () => {
+  const row = N(obs({
+    sourceId: "synthetic_demo",
+    sourceTimestamp: null,
+    receivedAt: iso(T0),
+    quantity: 4,
+  }));
+  const denied = evaluateAlert({ observation: row, history: [], now: T0 + MIN, env: ENV_ON });
+  assert.equal(denied.qualifies, false);
+  assert.equal(denied.reason, "unknown age");
+  const allowed = evaluateAlert({
+    observation: row,
+    history: [],
+    now: T0 + MIN,
+    env: ENV_ON,
+    sourcePolicies: {
+      synthetic_demo: { ...SOURCE_POLICIES.synthetic_demo, allowUnknownAgeAlerts: true },
+    },
+  });
+  assert.equal(allowed.qualifies, true);
+  assert.equal(allowed.timeBasis, "unknown");
+  const copy = alertMessage({
+    productName: "ETB", storeName: "Store", trigger: "restock", confidence: "high",
+    communityReported: false, ageMinutes: 0, timeBasis: "unknown",
+  });
+  assert.match(copy, /no check time/);
+  assert.doesNotMatch(copy, /Retailer-reported/);
+});
+
+test("receipt fallback does not claim the retailer checked at receipt time", () => {
+  const row = N(obs({
+    sourceId: "synthetic_demo",
+    sourceTimestamp: null,
+    receivedAt: iso(T0),
+    quantity: 4,
+  }));
+  const result = evaluateAlert({
+    observation: row,
+    history: [],
+    now: T0 + 5 * MIN,
+    env: ENV_ON,
+    sourcePolicies: {
+      synthetic_demo: { ...SOURCE_POLICIES.synthetic_demo, trustReceiptTime: true },
+    },
+  });
+  assert.equal(result.qualifies, true);
+  assert.equal(result.timeBasis, "receipt_fallback");
+  const copy = alertMessage({
+    productName: "ETB", storeName: "Store", trigger: result.trigger, confidence: result.confidence,
+    communityReported: false, ageMinutes: 5, timeBasis: result.timeBasis,
+  });
+  assert.match(copy, /did not provide a check time/);
+  assert.doesNotMatch(copy, /Retailer-reported/);
+});
+
+test("a fresh-looking row outside source retention does not alert", () => {
+  const row = N(obs({
+    sourceId: "synthetic_demo",
+    quantity: 4,
+    sourceTimestamp: iso(T0 - 2 * HOUR),
+    receivedAt: iso(T0 - 2 * HOUR),
+  }));
+  const result = evaluateAlert({
+    observation: row,
+    history: [],
+    now: T0,
+    env: ENV_ON,
+    sourcePolicies: {
+      synthetic_demo: {
+        ...SOURCE_POLICIES.synthetic_demo,
+        retention: { mode: "purge_after", maxRetentionMs: HOUR },
+      },
+    },
+  });
+  assert.equal(result.qualifies, false);
+  assert.equal(result.reason, "outside source retention");
+});
+
+test("community disagreement does not alert, and one reporter is not corroboration", () => {
+  const out = comm(1, "out_of_stock", { reporterId: "u1" });
+  const inn = comm(1.2, "in_stock", { reporterId: "u2" });
+  const conflict = ev(inn, [out]);
+  assert.equal(conflict.qualifies, false);
+  assert.equal(conflict.reason, "unresolved conflict");
+  const again = comm(1.1, "in_stock", { reporterId: "u1", id: "same" });
+  const first = comm(1, "in_stock", { reporterId: "u1" });
+  const confidence = evaluateAlert({ observation: first, history: [again], now: T0 + 1.2 * HOUR, env: ENV_ON });
+  assert.equal(confidence.confidence, "low");
+});
+
+test("Best Buy cannot generate a notification from its current policy", () => {
+  const row = N(obs({
+    sourceId: "bestbuy_developer_api",
+    quantity: undefined,
+    sourceTimestamp: iso(T0),
+    receivedAt: iso(T0),
+  }));
+  const result = evaluateAlert({ observation: row, history: [], now: T0 + MIN, env: { ...ENV_ON, SOURCE_BESTBUY_ENABLED: "1" } });
+  assert.equal(result.qualifies, false);
+  assert.equal(result.reason, "source cannot generate notifications");
 });
 
 test("cooldown and copy", () => {
