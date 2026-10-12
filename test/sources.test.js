@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SOURCE_REGISTRY, canRunSource, notificationsEnabled } from "../src/domain/sources.js";
+import { SOURCE_POLICIES } from "../src/domain/source-policy.js";
 
 test("no retailer adapter can run, even with its enable flag set", () => {
   const env = {
@@ -33,6 +34,35 @@ test("synthetic source is blocked in production", () => {
   assert.equal(canRunSource("synthetic_demo", env).allowed, true);
   assert.equal(canRunSource("synthetic_demo", { ...env, VERCEL_ENV: "production" }).allowed, false);
   assert.equal(canRunSource("synthetic_demo", { ...env, APP_ENV: "production" }).allowed, false);
+});
+
+test("a verified feed still needs documented permission, a tested adapter, and policy approval", () => {
+  const registry = {
+    fixture_feed: {
+      retailer: "fixture",
+      sourceType: "authorized_feed",
+      authorizationStatus: "VERIFIED",
+      envFlag: "SOURCE_FIXTURE_ENABLED",
+    },
+  };
+  const env = { SOURCE_FIXTURE_ENABLED: "1" };
+  const ready = {
+    fixture_feed: {
+      permissionRef: "https://example.invalid/approval",
+      adapterTested: true,
+      policyApproved: true,
+    },
+  };
+  assert.equal(canRunSource("fixture_feed", env, registry, ready).allowed, true);
+  assert.equal(canRunSource("fixture_feed", env, registry, {
+    fixture_feed: { ...ready.fixture_feed, policyApproved: false },
+  }).allowed, false);
+  assert.equal(canRunSource("fixture_feed", {}, registry, ready).allowed, false);
+  const flipped = {
+    ...SOURCE_REGISTRY,
+    bestbuy_developer_api: { ...SOURCE_REGISTRY.bestbuy_developer_api, authorizationStatus: "VERIFIED" },
+  };
+  assert.equal(canRunSource("bestbuy_developer_api", { SOURCE_BESTBUY_ENABLED: "1" }, flipped).allowed, false);
 });
 
 test("unknown sources are denied", () => {

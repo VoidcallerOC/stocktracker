@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { computeStockChange, comparability } from "../src/domain/deltas.js";
 import { normalizeObservation as N } from "../src/domain/observations.js";
+import { SOURCE_POLICIES } from "../src/domain/source-policy.js";
 import { obs, T0, HOUR, iso } from "./helpers.js";
 
 const at = (h, q, extra = {}) => N(obs({ quantity: q, sourceTimestamp: iso(T0 + h * HOUR), receivedAt: iso(T0 + h * HOUR), ...extra }));
@@ -22,6 +23,29 @@ test("no delta across sources, products, stores, unknown qty, or expired prev", 
   assert.equal(computeStockChange(p, at(1, undefined)), null);
   assert.equal(comparability(p, at(30, 12)).reason, "previous observation expired");
   assert.equal(computeStockChange(at(1, 12), p), null, "older observation is not 'next'");
+});
+
+test("receipt fallback is required before a missing source timestamp can form a delta", () => {
+  const prev = N(obs({ quantity: 2, sourceTimestamp: null, receivedAt: iso(T0) }));
+  const next = N(obs({ quantity: 6, sourceTimestamp: null, receivedAt: iso(T0 + HOUR) }));
+  assert.equal(comparability(prev, next).reason, "timestamp unknown");
+  const policies = {
+    "feed-a": { ...SOURCE_POLICIES.synthetic_demo, trustReceiptTime: true, quantityReliability: "exact", retention: { mode: "retain" } },
+  };
+  const change = computeStockChange(prev, next, iso(T0 + HOUR), undefined, policies);
+  assert.equal(change.delta, 4);
+  assert.equal(change.direction, "reported_increase");
+});
+
+test("status-only sources do not produce a quantity delta", () => {
+  const prev = N(obs({
+    sourceId: "bestbuy_developer_api", quantity: 2, sourceTimestamp: iso(T0), receivedAt: iso(T0),
+  }));
+  const next = N(obs({
+    sourceId: "bestbuy_developer_api", quantity: 9, sourceTimestamp: iso(T0 + HOUR), receivedAt: iso(T0 + HOUR),
+  }));
+  assert.equal(comparability(prev, next).reason, "source quantity is not reliable");
+  assert.equal(computeStockChange(prev, next, iso(T0 + HOUR)), null);
 });
 
 test("no delta from community estimates or identical quantities", () => {

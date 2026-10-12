@@ -105,6 +105,204 @@ do $$ begin
   end if;
 end $$;
 
+-- Public read is security invoker, hides reporter identity, and is not writable.
+do $$
+declare
+  opts text[];
+begin
+  select reloptions into opts from pg_class where oid = 'public_observations'::regclass;
+  if opts is null or not (opts @> array['security_invoker=true'] and opts @> array['security_barrier=true']) then
+    raise exception 'FAIL - public_observations must be security_invoker and security_barrier, got %', opts;
+  end if;
+  if pg_get_viewdef('public_observations'::regclass) ilike '%reporter_id%' then
+    raise exception 'FAIL - public view references reporter_id';
+  end if;
+  if has_column_privilege('anon', 'inventory_observations', 'reporter_id', 'select') then
+    raise exception 'FAIL - anon can select reporter_id';
+  end if;
+  if not has_column_privilege('anon', 'inventory_observations', 'availability', 'select') then
+    raise exception 'FAIL - anon cannot select public availability column';
+  end if;
+  if has_table_privilege('anon', 'subscriptions', 'select')
+     or has_table_privilege('anon', 'audit_log', 'select') then
+    raise exception 'FAIL - anon can read private tables';
+  end if;
+  raise notice 'ok - public view ownership options and column grants';
+end $$;
+
+set role anon;
+select expect_error($$insert into public_observations (id, product_id, store_id, source_id, source_type, availability, quantity_kind, quantity_exact, quantity_min, quantity_max, source_timestamp, received_at, verification_status, community_reported) values ('00000000-0000-0000-0000-00000000f0aa','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','community','community_report','in_stock','estimate',null,1,1,now(),now(),'accepted',true)$$, 'anon cannot insert through public view');
+select expect_error($$update public_observations set availability = 'out_of_stock'$$, 'anon cannot update public view');
+select expect_error($$delete from public_observations$$, 'anon cannot delete public view');
+select expect_error($$select reporter_id from inventory_observations$$, 'anon cannot read reporter_id');
+select expect_error($$insert into inventory_observations (product_id, store_id, source_id, source_type, availability, quantity_kind, verification_status, fingerprint) values ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','synthetic_demo','authorized_feed','in_stock','unknown','verified','fp-anon')$$, 'anon cannot insert observations');
+select expect_error($$select * from subscriptions$$, 'anon cannot read subscriptions');
+select expect_error($$select * from purge_expired_source_data(now())$$, 'anon cannot purge');
+do $$ begin
+  if (select count(*) from public_observations) <> 1 then
+    raise exception 'FAIL - anon should see only the accepted community report';
+  end if;
+  if (select community_reported from public_observations) is not true then
+    raise exception 'FAIL - community report must be distinguishable';
+  end if;
+  raise notice 'ok - anon public read';
+end $$;
+reset role;
+
+-- Contradictory community reports stay visible and keep reporter ids off the public surface.
+insert into inventory_observations (id, product_id, store_id, source_id, source_type, availability, quantity_kind, quantity_min, quantity_max, verification_status, reporter_id, fingerprint, received_at)
+values
+  ('00000000-0000-0000-0000-00000000f011','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','community','community_report','in_stock','estimate',1,2,'accepted','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','fp-conflict-in', clock_timestamp()),
+  ('00000000-0000-0000-0000-00000000f012','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','community','community_report','out_of_stock','estimate',0,0,'accepted','bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb','fp-conflict-out', clock_timestamp()),
+  ('00000000-0000-0000-0000-00000000f013','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','community','community_report','in_stock','estimate',1,2,'accepted','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','fp-dup-same-reporter', clock_timestamp());
+do $$ begin
+  if (select count(*) from public_observations where id in (
+    '00000000-0000-0000-0000-00000000f011',
+    '00000000-0000-0000-0000-00000000f012',
+    '00000000-0000-0000-0000-00000000f013')) <> 3 then
+    raise exception 'FAIL - contradictory and duplicate community rows must remain visible to the resolver';
+  end if;
+  raise notice 'ok - contradictory community rows are not collapsed in the public feed';
+end $$;
+update inventory_observations set verification_status = 'expired' where fingerprint = 'fp-conflict-out';
+do $$ begin
+  if exists (select 1 from public_observations where id = '00000000-0000-0000-0000-00000000f012') then
+    raise exception 'FAIL - expired community report still public';
+  end if;
+  if not exists (select 1 from inventory_observations where fingerprint = 'fp-conflict-out') then
+    raise exception 'FAIL - expiring a community report must not delete history';
+  end if;
+  raise notice 'ok - expired community report hidden, row kept';
+end $$;
+
+-- Retention: authorization, exact 72h boundary, derived payload removal, repeat, and failed purge.
+insert into retailers values ('walmart','Walmart');
+insert into inventory_sources (id, retailer_id, source_type, authorization_status) values
+  ('bestbuy_developer_api','bestbuy','authorized_feed','PARTIAL'),
+  ('walmart_affiliate_api','walmart','authorized_feed','VERIFIED'),
+  ('retention_fixture', null, 'authorized_feed', 'VERIFIED');
+insert into source_retention_policies (source_id, mode, max_age, contractual_basis, provisional)
+values ('retention_fixture','purge_after', interval '72 hours', 'test fixture for retention boundary', true);
+
+insert into inventory_observations (id, product_id, store_id, source_id, source_type, availability, quantity_kind, quantity_exact, verification_status, fingerprint, received_at)
+values
+  ('00000000-0000-0000-0000-00000000f021','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','bestbuy_developer_api','authorized_feed','in_stock','exact',42,'verified','fp-bb-old', clock_timestamp() - interval '72 hours'),
+  ('00000000-0000-0000-0000-00000000f022','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','bestbuy_developer_api','authorized_feed','in_stock','exact',7,'verified','fp-bb-young', clock_timestamp() - interval '71 hours'),
+  ('00000000-0000-0000-0000-00000000f023','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','retention_fixture','authorized_feed','in_stock','exact',3,'verified','fp-fix-old', clock_timestamp() - interval '72 hours'),
+  ('00000000-0000-0000-0000-00000000f024','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','retention_fixture','authorized_feed','in_stock','exact',4,'verified','fp-fix-young', clock_timestamp() - interval '72 hours' + interval '1 minute'),
+  ('00000000-0000-0000-0000-00000000f025','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','walmart_affiliate_api','authorized_feed','in_stock','exact',9,'verified','fp-wmt-fresh', clock_timestamp());
+
+insert into stock_changes (product_id, store_id, source_id, previous_observation_id, new_observation_id, previous_quantity, new_quantity, delta)
+values ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','bestbuy_developer_api','00000000-0000-0000-0000-00000000f021','00000000-0000-0000-0000-00000000f022',2,42,40);
+insert into notification_events (id, idempotency_key, observation_id, trigger, confidence, community_reported)
+values ('00000000-0000-0000-0000-00000000e021','k-bb-old','00000000-0000-0000-0000-00000000f021','restock','high',false);
+insert into moderation_actions (observation_id, moderator_id, action, reason)
+values ('00000000-0000-0000-0000-00000000f021','cccccccc-cccc-cccc-cccc-cccccccccccc','accept','secret-payload-42');
+
+insert into inventory_observations (id, product_id, store_id, source_id, source_type, availability, quantity_kind, verification_status, reporter_id, fingerprint, received_at)
+values
+  ('00000000-0000-0000-0000-00000000f031','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','community','community_report','in_stock','unknown','accepted','dddddddd-dddd-dddd-dddd-dddddddddddd','fp-comm-old', clock_timestamp() - interval '12 hours'),
+  ('00000000-0000-0000-0000-00000000f032','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','community','community_report','out_of_stock','unknown','accepted','eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee','fp-comm-young', clock_timestamp() - interval '12 hours' + interval '1 minute');
+
+set role anon;
+do $$ begin
+  if exists (select 1 from public_observations where source_id = 'bestbuy_developer_api') then
+    raise exception 'FAIL - partial Best Buy rows must not be public';
+  end if;
+  if exists (select 1 from public_observations where source_id = 'walmart_affiliate_api') then
+    raise exception 'FAIL - do_not_retain rows must not be public';
+  end if;
+  if exists (select 1 from public_observations where id = '00000000-0000-0000-0000-00000000f023') then
+    raise exception 'FAIL - observation at the 72h boundary is still public';
+  end if;
+  if not exists (select 1 from public_observations where id = '00000000-0000-0000-0000-00000000f024') then
+    raise exception 'FAIL - observation inside the retention window should be public';
+  end if;
+  raise notice 'ok - anon retention and authorization filters';
+end $$;
+reset role;
+
+select * from purge_expired_source_data(clock_timestamp());
+
+do $$ begin
+  if exists (select 1 from inventory_observations where fingerprint in ('fp-bb-old','fp-fix-old','fp-wmt-fresh')) then
+    raise exception 'FAIL - expired or do-not-retain payloads were not deleted';
+  end if;
+  if not exists (select 1 from inventory_observations where fingerprint in ('fp-bb-young','fp-fix-young')) then
+    raise exception 'FAIL - in-window observations were deleted';
+  end if;
+  if exists (select 1 from stock_changes where new_quantity = 42 or previous_quantity = 2 and source_id = 'bestbuy_developer_api') then
+    raise exception 'FAIL - derived Best Buy quantities survived purge';
+  end if;
+  if exists (select 1 from notification_events where idempotency_key = 'k-bb-old') then
+    raise exception 'FAIL - notification row for purged observation survived';
+  end if;
+  if exists (select 1 from moderation_actions where reason = 'secret-payload-42') then
+    raise exception 'FAIL - moderation payload survived purge';
+  end if;
+  if exists (
+    select 1
+    from audit_log,
+         jsonb_array_elements(detail->'sources') src
+    where action = 'retention_purge'
+      and (
+        detail::text like '%secret-payload%'
+        or detail::text like '%fp-bb-old%'
+        or src - array['source_id','deleted','expired'] <> '{}'::jsonb
+      )
+  ) then
+    raise exception 'FAIL - purge audit stored retailer payload';
+  end if;
+  if (select verification_status from inventory_observations where fingerprint = 'fp-comm-old') <> 'expired' then
+    raise exception 'FAIL - old community report should be expired, not deleted';
+  end if;
+  if (select verification_status from inventory_observations where fingerprint = 'fp-comm-young') <> 'accepted' then
+    raise exception 'FAIL - community report inside the display window was expired';
+  end if;
+  if not exists (select 1 from public_observations where id = '00000000-0000-0000-0000-00000000f024') then
+    raise exception 'FAIL - in-window fixture disappeared from the public feed';
+  end if;
+  if exists (select 1 from public_observations where id = '00000000-0000-0000-0000-00000000f031') then
+    raise exception 'FAIL - expired community report is public after purge';
+  end if;
+  raise notice 'ok - retention purge boundaries';
+end $$;
+
+select * from purge_expired_source_data(clock_timestamp());
+do $$ begin
+  if exists (
+    select 1 from purge_expired_source_data(clock_timestamp())
+    where deleted_observations <> 0 or expired_observations <> 0
+  ) then
+    raise exception 'FAIL - repeat purge was not a no-op';
+  end if;
+  raise notice 'ok - repeat purge is a no-op';
+end $$;
+
+-- Give app_user the table privileges and an RLS delete policy a mistaken grant would
+-- confer. The trigger must still reject the delete because the caller is not the
+-- purge function owner.
+create policy observations_app_select on inventory_observations for select to app_user using (true);
+create policy observations_app_delete on inventory_observations for delete to app_user using (true);
+grant select, delete on inventory_observations to app_user;
+set role app_user;
+select set_config('app.retention_purge', 'on', true);
+select expect_error($$delete from inventory_observations where fingerprint = 'fp-fix-young'$$, 'app user cannot purge even with the retention flag');
+reset role;
+revoke select, delete on inventory_observations from app_user;
+drop policy observations_app_select on inventory_observations;
+drop policy observations_app_delete on inventory_observations;
+do $$ begin
+  if not exists (select 1 from inventory_observations where fingerprint = 'fp-fix-young') then
+    raise exception 'FAIL - failed purge attempt removed a row';
+  end if;
+  raise notice 'ok - failed purge left rows in place';
+end $$;
+
+set role retention_worker;
+select * from purge_expired_source_data(clock_timestamp());
+reset role;
+
 -- 17. Synthetic data cannot enter production.
 update app_settings set environment='production';
 select expect_error($$insert into products (game_id, canonical_name, category, is_synthetic) values ('pokemon','demo','tin',true)$$, 'synthetic product blocked in prod');

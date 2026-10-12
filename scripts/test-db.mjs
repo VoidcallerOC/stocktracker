@@ -19,11 +19,20 @@ if (!["localhost", "127.0.0.1", "::1", ""].includes(host) || /supabase|neon|rend
   console.error("Refusing to run destructive DB tests against a non-local database.");
   process.exit(1);
 }
+// The SQL files create schemas from scratch. Reset the disposable database first so a
+// local rerun does not collide with the previous migration. Remote URLs are refused above.
+execFileSync(
+  "psql",
+  [url, "-v", "ON_ERROR_STOP=1", "-q", "-c",
+    "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS auth CASCADE;"],
+  { stdio: "inherit" },
+);
 execFileSync(
   "psql",
   [url, "-v", "ON_ERROR_STOP=1", "-q",
     "-f", "test/db/00_supabase_stub.sql",
     "-f", "db/migrations/0001_init.sql",
+    "-f", "db/migrations/0002_public_read_and_retention.sql",
     "-f", "test/db/constraints.test.sql"],
   { stdio: "inherit" },
 );
