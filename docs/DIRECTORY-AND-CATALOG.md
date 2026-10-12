@@ -12,7 +12,7 @@ These are the same four words used for source authorization:
 |---|---|
 | `UNVERIFIED` | A draft claim. It is not public. It must not be described as checked. |
 | `PARTIAL` | Some cited evidence exists, and a requirement is still open. It is not public. |
-| `VERIFIED` | The claim has a `verified_at` timestamp and at least one `VERIFIED` evidence row. Public views can show it. |
+| `VERIFIED` | The claim has a `verified_at` timestamp and a `VERIFIED` evidence row with field scope `record`. Public views can show it. Another field's evidence does not verify the record. |
 | `BLOCKED` | A reviewer recorded why the claim must not be used. `reviewNote` is required on import. It is not public. |
 
 Creating a row, passing a test, or seeing a name in a search result does not verify it. Store existence, street address, coordinates, retailer identity, product identity, set name, release date, and each identifier are separate claims.
@@ -48,7 +48,7 @@ Do not reuse a location row for a different shop, and do not overwrite a moved s
 - Relocated: retire the old `importKey` and insert a new `importKey` for the new address. `successorImportKey` can point at the new key.
 - Misidentified: set `verificationStatus: "BLOCKED"` with a `reviewNote`, or retire the row with a reason that says it was misidentified. A `VERIFIED` identity change also requires `resolution: "accept_incoming"`.
 
-`app.directory_resolution` must be `accept_incoming` or `retire`, and the database role must own the table. Setting the custom variable as `anon` does not authorize the change. A weaker status or a different verified value is a conflict until that resolution is present. `review_note` can be edited without a resolution.
+`app.directory_resolution` must be `accept_incoming` or `retire`, and the database role must own the table. Setting the custom variable as `anon` does not authorize the change. A weaker status, a different verified value, `verified_at`, or `import_key` is a conflict until that resolution is present. `resolution: "retire"` can retire a verified store and set its reason and successor. It cannot rewrite the store's identity. `review_note` can be edited without a resolution. A successor key must name a different active store that already exists in the file or the directory.
 
 ## Products
 
@@ -101,7 +101,7 @@ A `VERIFIED` or `PARTIAL` record needs `verifiedAt` and evidence:
 }
 ```
 
-`fieldScope` is one of `record`, `address`, `coordinates`, `set_name`, `release_date`, `identifier`, `website`, `phone`. Evidence status cannot outrank the record. `sourceUrl` is optional and, when present, must be `http` or `https`. The importer does not fetch it.
+`fieldScope` is one of `record`, `address`, `coordinates`, `set_name`, `release_date`, `identifier`, `website`, `phone`. A `VERIFIED` or `PARTIAL` record needs `record` evidence. Address evidence may also use `record`. Set name, release date, coordinates, website, phone, and each identifier need their own scope. Identifier evidence sets `claimKey` to that identifier's value. Evidence status cannot outrank the record. `sourceUrl` is optional and, when present, must be `http` or `https`. The importer does not fetch it.
 
 CSV is a flat alternative for drafts and for a single evidence item per row. Identifiers are JSON-only, so a spreadsheet cannot smuggle a code without the evidence object. Headers:
 

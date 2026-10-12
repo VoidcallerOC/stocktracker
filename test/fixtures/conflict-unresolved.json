@@ -1,5 +1,20 @@
 {
-  "fixtureNotice": "SYNTHETIC TEST FIXTURE. Not a real product. Used to prove a verified row is not overwritten.",
+  "fixtureNotice": "SYNTHETIC TEST FIXTURE. Not a real product or store. Used to prove a verified row is not overwritten and a sibling row is not inserted.",
+  "stores": [
+    {
+      "importKey": "test-conflict-sibling",
+      "retailerId": "bestbuy",
+      "name": "TEST Synthetic Conflict Sibling",
+      "addressLine": "99 Fixture Lane",
+      "city": "Fixtureville",
+      "state": "CT",
+      "zip": "06099",
+      "verificationStatus": "UNVERIFIED",
+      "isSynthetic": true,
+      "games": [],
+      "evidence": []
+    }
+  ],
   "products": [
     {
       "importKey": "test-lock-product",

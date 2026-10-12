@@ -4,11 +4,10 @@ Updated 2026-10-12 from the live repository, not from the earlier baseline note.
 
 ## Repository state checked
 
-- Default branch `main` at `74172b56221bc1effc32c3f65227ae69be099b68`.
-- PR #1 and PR #2 are merged.
-- Push CI on that SHA passed both jobs: [run 38140677672](https://github.com/VoidcallerOC/stocktracker/actions/runs/38140677672) (`Syntax + unit tests`, `Database constraint tests`).
-- `main` is not protected (`protected: false`). The ruleset list is empty.
-- The token used here received HTTP 403 on the branch-protection endpoint, so protection was not changed.
+PRs #1 through #4 are merged. An earlier copy of this section named the PR #2 SHA; that note is historical. Read the commit under test with `git rev-parse HEAD` and its Actions run. Do not treat a previous green run as proof for a newer commit.
+
+- `main` was not protected (`protected: false`) when last checked. The ruleset list was empty.
+- The token used for that check received HTTP 403 on the branch-protection endpoint, so protection was not changed.
 
 ### Branch protection still has to be turned on by an admin
 

@@ -1,14 +1,19 @@
 -- 0003_store_directory_and_catalog.sql
 -- Store directory and sealed-product catalog claims for Pokémon TCG and One Piece Card Game.
 --
--- Apply with psql after 0001_init.sql. This file does not read or modify objects introduced
--- by 0002_public_read_and_retention.sql (source_retention_policies, observation_is_public_row,
--- purge_expired_source_data, or the replaced public_observations view). It can be applied
--- before or after that migration.
+-- Supported chain: 0001_init.sql, then 0002_public_read_and_retention.sql, then this file.
+-- The test runner resets the schema and applies migration files in that filename order.
+-- This file does not read or replace 0002 objects (source_retention_policies,
+-- observation_is_public_row, purge_expired_source_data, or public_observations).
+-- Applying this file before 0002 also succeeds, and 0002 still installs afterwards.
+-- Do not skip 0001. Do not assume a hosted database has already been updated.
 --
 -- No store, product, business, identifier, or evidence row is inserted here.
 -- A directory row is not inventory and does not authorize a retailer API.
 -- Legacy rows stay UNVERIFIED. Creating a row does not verify it.
+-- 0001 allowed set_name and official_url before a verification column existed.
+-- Those values are copied onto the internal review note and cleared before the
+-- new checks are installed. They are not marked verified and they are not public.
 --
 -- psql meta-command below is intentional: CREATE ROLE cannot run inside a transaction.
 
@@ -71,6 +76,11 @@ alter table stores add column store_format text
 
 alter table stores add constraint stores_verified_at_ck
   check (verification_status not in ('PARTIAL', 'VERIFIED') or verified_at is not null);
+-- See the file header. This keeps an unverified legacy URL off the public column.
+update stores
+set review_note = concat_ws(E'\n', review_note, 'unverified official_url moved during 0003: ' || official_url),
+    official_url = null
+where official_url is not null;
 alter table stores add constraint stores_public_contact_ck
   check (
     (official_url is null and public_phone is null)
@@ -106,6 +116,11 @@ alter table products add column review_note text;
 
 alter table products add constraint products_verified_at_ck
   check (verification_status not in ('PARTIAL', 'VERIFIED') or verified_at is not null);
+-- See the file header. A legacy set name is not evidence and does not become public.
+update products
+set review_note = concat_ws(E'\n', review_note, 'unverified set_name moved during 0003: ' || set_name),
+    set_name = null
+where set_name is not null;
 alter table products add constraint products_set_name_ck
   check (set_name is null or verification_status in ('PARTIAL', 'VERIFIED'));
 alter table products add constraint products_release_date_ck
@@ -121,7 +136,7 @@ create unique index products_identity_uidx on products (
   lower(canonical_name),
   coalesce(language, ''),
   coalesce(region, ''),
-  coalesce(packaging_variant, '')
+  coalesce(lower(packaging_variant), '')
 );
 create index products_verification_idx on products (game_id, verification_status);
 
@@ -147,7 +162,11 @@ create table record_evidence (
   field_scope text not null check (field_scope in (
     'record', 'address', 'coordinates', 'set_name', 'release_date', 'identifier', 'website', 'phone'
   )),
+  -- Identifier evidence names the code it supports. Other scopes do not.
+  claim_key text,
   source_label text not null check (length(btrim(source_label)) > 0),
+  check (field_scope = 'identifier' or claim_key is null),
+  check (field_scope <> 'identifier' or length(btrim(claim_key)) > 0),
   source_url text,
   verification_status text not null check (verification_status in ('VERIFIED', 'PARTIAL', 'BLOCKED', 'UNVERIFIED')),
   observed_at timestamptz not null,
@@ -209,17 +228,33 @@ declare
   claim_subject text := tg_argv[0];
 begin
   if claim_subject = 'product_identifier' then
-    if new.verification_status in ('PARTIAL', 'VERIFIED') and not exists (
-      select 1 from record_evidence e
-      where e.subject_type = 'product'
-        and e.subject_id = new.product_id
-        and e.field_scope = 'identifier'
-        and (
-          (new.verification_status = 'VERIFIED' and e.verification_status = 'VERIFIED')
-          or (new.verification_status = 'PARTIAL' and e.verification_status in ('PARTIAL', 'VERIFIED'))
-        )
-    ) then
-      raise exception 'identifier verification requires identifier evidence on the product';
+    if new.verification_status not in ('PARTIAL', 'VERIFIED') then
+      raise exception 'unverified identifiers stay absent';
+    end if;
+    if new.verification_status in ('PARTIAL', 'VERIFIED') then
+      if not exists (
+        select 1 from products p
+        where p.id = new.product_id
+          and (
+            (new.verification_status = 'VERIFIED' and p.verification_status = 'VERIFIED')
+            or (new.verification_status = 'PARTIAL' and p.verification_status in ('PARTIAL', 'VERIFIED'))
+          )
+      ) then
+        raise exception 'identifier verification cannot attach to a weaker product';
+      end if;
+      if not exists (
+        select 1 from record_evidence e
+        where e.subject_type = 'product'
+          and e.subject_id = new.product_id
+          and e.field_scope = 'identifier'
+          and e.claim_key = new.value
+          and (
+            (new.verification_status = 'VERIFIED' and e.verification_status = 'VERIFIED')
+            or (new.verification_status = 'PARTIAL' and e.verification_status in ('PARTIAL', 'VERIFIED'))
+          )
+      ) then
+        raise exception 'identifier verification requires evidence for that identifier';
+      end if;
     end if;
     return null;
   end if;
@@ -228,20 +263,87 @@ begin
     select 1 from record_evidence e
     where e.subject_type = claim_subject
       and e.subject_id = new.id
+      and e.field_scope = 'record'
       and e.verification_status = 'VERIFIED'
   ) then
-    raise exception 'VERIFIED % requires a VERIFIED evidence row', claim_subject;
+    raise exception 'VERIFIED % requires record evidence', claim_subject;
   end if;
   if new.verification_status = 'PARTIAL' and not exists (
     select 1 from record_evidence e
     where e.subject_type = claim_subject
       and e.subject_id = new.id
+      and e.field_scope = 'record'
       and e.verification_status in ('PARTIAL', 'VERIFIED')
   ) then
-    raise exception 'PARTIAL % requires evidence', claim_subject;
+    raise exception 'PARTIAL % requires record evidence', claim_subject;
+  end if;
+
+  if claim_subject = 'product' then
+    if new.set_name is not null and not exists (
+      select 1 from record_evidence e
+      where e.subject_type = 'product' and e.subject_id = new.id
+        and e.field_scope = 'set_name'
+        and (
+          (new.verification_status = 'VERIFIED' and e.verification_status = 'VERIFIED')
+          or (new.verification_status <> 'VERIFIED' and e.verification_status in ('PARTIAL', 'VERIFIED'))
+        )
+    ) then
+      raise exception 'set_name requires set_name evidence';
+    end if;
+    if new.release_date is not null and not exists (
+      select 1 from record_evidence e
+      where e.subject_type = 'product' and e.subject_id = new.id
+        and e.field_scope = 'release_date'
+        and (
+          (new.verification_status = 'VERIFIED' and e.verification_status = 'VERIFIED')
+          or (new.verification_status <> 'VERIFIED' and e.verification_status in ('PARTIAL', 'VERIFIED'))
+        )
+    ) then
+      raise exception 'release_date requires release_date evidence';
+    end if;
+  end if;
+
+  if claim_subject = 'business' then
+    if new.public_website is not null and not exists (
+      select 1 from record_evidence e
+      where e.subject_type = 'business' and e.subject_id = new.id
+        and e.field_scope = 'website'
+        and (
+          (new.verification_status = 'VERIFIED' and e.verification_status = 'VERIFIED')
+          or (new.verification_status <> 'VERIFIED' and e.verification_status in ('PARTIAL', 'VERIFIED'))
+        )
+    ) then
+      raise exception 'public_website requires website evidence';
+    end if;
   end if;
 
   if claim_subject = 'store' then
+    if new.verification_status = 'VERIFIED'
+       and new.address_verification_status not in ('PARTIAL', 'VERIFIED') then
+      raise exception 'verified store requires address verification';
+    end if;
+    if new.official_url is not null and not exists (
+      select 1 from record_evidence e
+      where e.subject_type = 'store' and e.subject_id = new.id
+        and e.field_scope = 'website'
+        and (
+          (new.verification_status = 'VERIFIED' and e.verification_status = 'VERIFIED')
+          or (new.verification_status <> 'VERIFIED' and e.verification_status in ('PARTIAL', 'VERIFIED'))
+        )
+    ) then
+      raise exception 'official_url requires website evidence';
+    end if;
+    if new.public_phone is not null and not exists (
+      select 1 from record_evidence e
+      where e.subject_type = 'store' and e.subject_id = new.id
+        and e.field_scope = 'phone'
+        and (
+          (new.verification_status = 'VERIFIED' and e.verification_status = 'VERIFIED')
+          or (new.verification_status <> 'VERIFIED' and e.verification_status in ('PARTIAL', 'VERIFIED'))
+        )
+    ) then
+      raise exception 'public_phone requires phone evidence';
+    end if;
     if new.address_verification_status = 'VERIFIED' and not exists (
       select 1 from record_evidence e
       where e.subject_type = 'store' and e.subject_id = new.id
@@ -301,7 +403,8 @@ begin
   end if;
   if tg_table_name = 'products' then
     identity_changed :=
-      new.canonical_name is distinct from old.canonical_name
+      new.import_key is distinct from old.import_key
+      or new.canonical_name is distinct from old.canonical_name
       or new.category is distinct from old.category
       or new.set_name is distinct from old.set_name
       or new.language is distinct from old.language
@@ -311,33 +414,44 @@ begin
       or new.game_id is distinct from old.game_id
       or new.lifecycle_status is distinct from old.lifecycle_status
       or new.verification_status is distinct from old.verification_status
+      or new.verified_at is distinct from old.verified_at
       or new.official_reference_url is distinct from old.official_reference_url
       or new.is_synthetic is distinct from old.is_synthetic;
   elsif tg_table_name = 'stores' then
     identity_changed :=
-      new.name is distinct from old.name
+      new.import_key is distinct from old.import_key
+      or new.name is distinct from old.name
       or new.address_line is distinct from old.address_line
       or new.city is distinct from old.city
+      or new.state is distinct from old.state
       or new.zip is distinct from old.zip
       or new.latitude is distinct from old.latitude
       or new.longitude is distinct from old.longitude
+      or new.location_source is distinct from old.location_source
+      or new.location_verified_at is distinct from old.location_verified_at
       or new.retailer_id is distinct from old.retailer_id
       or new.external_store_id is distinct from old.external_store_id
       or new.official_url is distinct from old.official_url
       or new.public_phone is distinct from old.public_phone
       or new.business_id is distinct from old.business_id
+      or new.store_format is distinct from old.store_format
       or new.verification_status is distinct from old.verification_status
+      or new.verified_at is distinct from old.verified_at
       or new.record_status is distinct from old.record_status
+      or new.retired_reason is distinct from old.retired_reason
+      or new.successor_store_id is distinct from old.successor_store_id
       or new.address_verification_status is distinct from old.address_verification_status
       or new.coordinate_verification_status is distinct from old.coordinate_verification_status
       or new.is_synthetic is distinct from old.is_synthetic;
   elsif tg_table_name = 'businesses' then
     identity_changed :=
-      new.display_name is distinct from old.display_name
+      new.import_key is distinct from old.import_key
+      or new.display_name is distinct from old.display_name
       or new.kind is distinct from old.kind
       or new.retailer_id is distinct from old.retailer_id
       or new.public_website is distinct from old.public_website
       or new.verification_status is distinct from old.verification_status
+      or new.verified_at is distinct from old.verified_at
       or new.is_synthetic is distinct from old.is_synthetic;
   else
     identity_changed := true;
@@ -354,12 +468,60 @@ begin
      or current_user is distinct from owner_name then
     raise exception 'verified % update requires directory resolution by the table owner', tg_table_name;
   end if;
-  if tg_table_name = 'stores' then
-    if resolution = 'retire' and new.record_status is distinct from 'retired' then
-      raise exception 'retire resolution requires record_status retired';
+  if resolution = 'retire' then
+    if tg_table_name is distinct from 'stores' or new.record_status is distinct from 'retired' then
+      raise exception 'retire resolution requires a retired store';
+    end if;
+    if new.import_key is distinct from old.import_key
+       or new.name is distinct from old.name
+       or new.address_line is distinct from old.address_line
+       or new.city is distinct from old.city
+       or new.state is distinct from old.state
+       or new.zip is distinct from old.zip
+       or new.latitude is distinct from old.latitude
+       or new.longitude is distinct from old.longitude
+       or new.location_source is distinct from old.location_source
+       or new.location_verified_at is distinct from old.location_verified_at
+       or new.retailer_id is distinct from old.retailer_id
+       or new.external_store_id is distinct from old.external_store_id
+       or new.official_url is distinct from old.official_url
+       or new.public_phone is distinct from old.public_phone
+       or new.business_id is distinct from old.business_id
+       or new.store_format is distinct from old.store_format
+       or new.verification_status is distinct from old.verification_status
+       or new.verified_at is distinct from old.verified_at
+       or new.address_verification_status is distinct from old.address_verification_status
+       or new.coordinate_verification_status is distinct from old.coordinate_verification_status
+       or new.is_synthetic is distinct from old.is_synthetic then
+      raise exception 'retire resolution cannot change other identity fields';
     end if;
   end if;
   return new;
+end $$;
+
+-- Deleting or weakening evidence re-checks the subject. A VERIFIED claim cannot
+-- outlive the evidence that supports it. Adding evidence does not re-check.
+create or replace function directory_recheck_evidence_subject()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  ident uuid;
+begin
+  if old.subject_type = 'product' then
+    update products set review_note = review_note where id = old.subject_id;
+    for ident in select i.id from product_identifiers i where i.product_id = old.subject_id loop
+      update product_identifiers set verification_source = verification_source where id = ident;
+    end loop;
+  elsif old.subject_type = 'store' then
+    update stores set review_note = review_note where id = old.subject_id;
+  elsif old.subject_type = 'business' then
+    update businesses set review_note = review_note where id = old.subject_id;
+  elsif old.subject_type = 'product_identifier' then
+    update product_identifiers set verification_source = verification_source where id = old.subject_id;
+  end if;
+  return null;
 end $$;
 
 -- Names sort before the synthetic-row triggers so the owner check runs first.
@@ -369,6 +531,14 @@ create trigger a_guard_stores_verified before update on stores
   for each row execute function guard_verified_directory_update();
 create trigger a_guard_businesses_verified before update on businesses
   for each row execute function guard_verified_directory_update();
+create trigger record_evidence_recheck
+  after update or delete on record_evidence
+  for each row execute function directory_recheck_evidence_subject();
+
+revoke all on function directory_prepare_text() from public;
+revoke all on function directory_claim_needs_evidence() from public;
+revoke all on function guard_verified_directory_update() from public;
+revoke all on function directory_recheck_evidence_subject() from public;
 
 -- ---------------------------------------------------------------- public read
 -- security_invoker plus RLS: anon sees a verified row only when the row itself is verified.

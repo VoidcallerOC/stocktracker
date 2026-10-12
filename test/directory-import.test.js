@@ -92,7 +92,7 @@ test("a record is not verified without evidence", () => {
   });
   assert.equal(plan.summary.inserts, 0);
   assert.equal(plan.summary.rejected, 1);
-  assert.match(plan.rejected[0].errors.join(" "), /requires evidence/);
+  assert.match(plan.rejected[0].errors.join(" "), /requires record evidence/);
 
   const labeled = planImport({
     products: [product({
@@ -229,6 +229,154 @@ test("malformed CSV rows are rejected and retailer feeds stay disabled", () => {
   assert.equal(SOURCE_REGISTRY.target.authorizationStatus, "BLOCKED");
   assert.equal(SOURCE_REGISTRY.gamestop.authorizationStatus, "UNVERIFIED");
   assert.equal(SOURCE_REGISTRY.bestbuy_developer_api.authorizationStatus, "PARTIAL");
+});
+
+test("field evidence, successors, and identifier ownership stay specific", () => {
+  const record = evidence();
+  const setOnly = planImport({
+    products: [product({
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+      setName: "Probe Set",
+      evidence: [evidence({ fieldScope: "set_name" })],
+    })],
+  });
+  assert.equal(setOnly.ok, false);
+  assert.match(setOnly.rejected[0].errors.join(" "), /record evidence/);
+
+  const phoneOnly = planImport({
+    businesses: [banner],
+    stores: [store({
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+      addressVerificationStatus: "VERIFIED",
+      publicPhone: "860-555-0100",
+      evidence: [evidence({ fieldScope: "phone" })],
+    })],
+  });
+  assert.equal(phoneOnly.ok, false);
+
+  const addressed = planImport({
+    businesses: [banner],
+    stores: [store({
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+      addressVerificationStatus: "VERIFIED",
+      publicPhone: "860-555-0100",
+      evidence: [record, evidence({ fieldScope: "phone" })],
+    })],
+  });
+  assert.equal(addressed.ok, true, JSON.stringify(addressed.rejected));
+
+  const missingSuccessor = planImport({
+    businesses: [banner],
+    stores: [store({ recordStatus: "retired", retiredReason: "moved", successorImportKey: "missing-store" })],
+  });
+  assert.equal(missingSuccessor.ok, false);
+  assert.match(missingSuccessor.rejected.map((row) => row.errors.join(" ")).join(" "), /does not match a store/);
+
+  const selfSuccessor = planImport({
+    businesses: [banner],
+    stores: [store({ recordStatus: "retired", retiredReason: "loop", successorImportKey: "test-unit-store" })],
+  });
+  assert.equal(selfSuccessor.ok, false);
+  assert.match(selfSuccessor.rejected.map((row) => row.errors.join(" ")).join(" "), /same store/);
+
+  const verifiedPlan = planImport({
+    businesses: [banner],
+    stores: [store({
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+      addressVerificationStatus: "VERIFIED",
+      evidence: [record],
+    })],
+  });
+  assert.equal(verifiedPlan.ok, true, JSON.stringify(verifiedPlan.rejected));
+  const verifiedStore = verifiedPlan.actions.find((action) => action.kind === "store").row;
+  const existingDirectory = {
+    businesses: [banner],
+    stores: [verifiedStore],
+  };
+  const retireAndRename = planImport({
+    businesses: [banner],
+    stores: [store({
+      name: "TEST Synthetic Unit Renamed",
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+      addressVerificationStatus: "VERIFIED",
+      recordStatus: "retired",
+      retiredReason: "closed",
+      resolution: "retire",
+      evidence: [record],
+    })],
+  }, existingDirectory);
+  assert.equal(retireAndRename.summary.conflicts, 1);
+  const retireOnly = planImport({
+    businesses: [banner],
+    stores: [store({
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+      addressVerificationStatus: "VERIFIED",
+      recordStatus: "retired",
+      retiredReason: "closed",
+      resolution: "retire",
+      evidence: [record],
+    })],
+  }, existingDirectory);
+  assert.equal(retireOnly.summary.updates, 1);
+  assert.equal(retireOnly.actions.find((action) => action.kind === "store").resolution, "retire");
+
+  const owned = product({
+    importKey: "test-unit-owned",
+    verificationStatus: "VERIFIED",
+    verifiedAt: observed,
+    evidence: [record, evidence({ fieldScope: "identifier", claimKey: "12345670" })],
+    identifiers: [{
+      idType: "gtin",
+      value: "12345670",
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+    }],
+  });
+  const firstCode = planImport({ products: [owned] });
+  assert.equal(firstCode.ok, true, firstCode.rejected);
+  const otherCode = planImport({
+    products: [product({
+      importKey: "test-unit-other-code",
+      canonicalName: "TEST Synthetic Other Code",
+      verificationStatus: "VERIFIED",
+      verifiedAt: observed,
+      evidence: [record, evidence({ fieldScope: "identifier", claimKey: "12345670" })],
+      identifiers: [{
+        idType: "gtin",
+        value: "12345670",
+        verificationStatus: "VERIFIED",
+        verifiedAt: observed,
+      }],
+    })],
+  }, { products: [firstCode.actions[0].row] });
+  assert.equal(otherCode.summary.conflicts, 1);
+  assert.match(otherCode.conflicts[0].reason, /another product/);
+
+  const quoted = renderApplySql(planImport({
+    products: [product({ canonicalName: "TEST O'Brien Tin" })],
+  }));
+  assert.match(quoted, /TEST O''Brien Tin/);
+  assert.doesNotMatch(quoted, /drop table/);
+  assert.throws(() => renderApplySql({
+    ok: true,
+    actions: [{ kind: "store", op: "insert", importKey: "x", resolution: null, row: store({ latitude: Number.NaN, longitude: -72.5 }) }],
+  }), /non-finite/);
+});
+
+test("malformed CSV quoting and invalid columns fail clearly", () => {
+  assert.throws(() => csvToDirectory("record_type,import_key\n\"unclosed,key\n"), /quote is not closed/);
+  assert.throws(() => csvToDirectory("record_type,import_key,not_a_column\nproduct,test-csv,secret\n"), /unknown CSV columns/);
+  assert.throws(() => csvToDirectory("record_type,record_type\nproduct,product\n"), /duplicate CSV column/);
+  assert.throws(
+    () => csvToDirectory("record_type,import_key,display_name,kind,verification_status,is_synthetic\nbusiness,probe-biz,TEST Synthetic,independent,UNVERIFIED,YES\n"),
+    /is_synthetic must be true or false/,
+  );
 });
 
 test("the catalog migration does not seed stores, products, or identifiers", () => {
