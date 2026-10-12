@@ -8,6 +8,10 @@
 //   - it is not a synthetic/demo source running in production.
 //
 // No retailer source is VERIFIED today, so no retailer adapter can run.
+// An enable flag is not permission. Authorized feeds also need a documented
+// permission reference, a tested adapter, and policy approval (see source-policy.js).
+
+import { SOURCE_POLICIES } from "./source-policy.js";
 
 export const SOURCE_REGISTRY = Object.freeze({
   // Affiliate API storeId lookups need extra business approval; status-only, no quantity.
@@ -67,17 +71,38 @@ export function isProduction(env) {
  * Kill switches: INGEST_KILL_ALL=1 stops every source; INGEST_KILL_<SOURCE_ID>=1 stops one.
  * @returns {{ allowed: true } | { allowed: false, reason: string }}
  */
-export function canRunSource(sourceId, env = {}, registry = SOURCE_REGISTRY) {
+export function canRunSource(sourceId, env = {}, registry = SOURCE_REGISTRY, policies = SOURCE_POLICIES) {
   const src = registry[sourceId];
   if (!src) return deny("unknown source");
   if (flag(env, "INGEST_KILL_ALL")) return deny("global ingestion kill switch engaged");
   if (flag(env, `INGEST_KILL_${sourceId.toUpperCase()}`)) return deny("source kill switch engaged");
   if (src.synthetic && isProduction(env)) return deny("synthetic source blocked in production");
-  if (src.authorizationStatus !== "VERIFIED") {
+  if (src.sourceType === "authorized_feed" && !src.synthetic) {
+    if (src.authorizationStatus !== "VERIFIED") {
+      return deny(`authorization status is ${src.authorizationStatus}`);
+    }
+    const policy = policies[sourceId];
+    if (!policy?.permissionRef || policy.adapterTested !== true || policy.policyApproved !== true) {
+      return deny("documented permission, tested adapter, or policy approval is missing");
+    }
+  } else if (src.authorizationStatus !== "VERIFIED") {
     return deny(`authorization status is ${src.authorizationStatus}`);
   }
   if (!flag(env, src.envFlag)) return deny(`${src.envFlag} not enabled`);
   return { allowed: true };
+}
+
+/**
+ * Retailer feeds that are not fully approved must not be shown as current stock.
+ * Synthetic fixtures and unknown test source ids are left to the caller.
+ */
+export function isUnauthorizedRetailerFeed(obs, registry = SOURCE_REGISTRY, policies = SOURCE_POLICIES) {
+  const src = registry[obs.sourceId];
+  if (!src || src.synthetic) return false;
+  if (src.sourceType !== "authorized_feed") return false;
+  if (src.authorizationStatus !== "VERIFIED") return true;
+  const policy = policies[obs.sourceId];
+  return !policy?.permissionRef || policy.adapterTested !== true || policy.policyApproved !== true;
 }
 
 /** Global notification kill switch: NOTIFICATIONS_KILL=1 suppresses all outbound alerts. */

@@ -20,6 +20,9 @@ if (!["localhost", "127.0.0.1", "::1", ""].includes(host) || /supabase|neon|rend
   console.error("Refusing to run destructive DB tests against a non-local database.");
   process.exit(1);
 }
+// The SQL files create schemas from scratch. Reset the disposable database first so a
+// local rerun does not collide with the previous migration. Remote URLs are refused above.
+// Migrations run in filename order, so 0002 public-read/retention applies before 0003.
 
 function psql(args) {
   execFileSync("psql", [url, "-v", "ON_ERROR_STOP=1", "-q", ...args], { stdio: "inherit" });

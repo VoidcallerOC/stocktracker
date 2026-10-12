@@ -2,7 +2,7 @@
 -- Store directory and sealed-product catalog claims for Pokémon TCG and One Piece Card Game.
 --
 -- Apply with psql after 0001_init.sql. This file does not read or modify objects introduced
--- by an unmerged retention/public-read migration (source_retention_policies, observation_is_public_row,
+-- by 0002_public_read_and_retention.sql (source_retention_policies, observation_is_public_row,
 -- purge_expired_source_data, or the replaced public_observations view). It can be applied
 -- before or after that migration.
 --
