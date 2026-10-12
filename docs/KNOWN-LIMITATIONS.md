@@ -37,3 +37,9 @@ These are fixed in code and covered by unit tests plus disposable Postgres tests
 3. **The schema has not been applied to a hosted database.** Local `npm run test:db` uses a throwaway Postgres only.
 4. **Retailer gates are unchanged.** Walmart is BLOCKED, Target is BLOCKED, GameStop is UNVERIFIED, and Best Buy is PARTIAL. `canRunSource()` denies all four even when their enable flags are set. An enable flag, by itself, is not authorization. See `docs/SOURCE-ACCESS-MATRIX.md`.
 5. **No UI, notification delivery, or production deploy.**
+
+## Store directory and sealed catalog
+
+Migration `0003_store_directory_and_catalog.sql` and `docs/DIRECTORY-AND-CATALOG.md` add the claim model and import workflow. They do not add real Connecticut stores or real sealed products. The ZIP check accepts any Connecticut `06xxx` code; that is not statewide coverage. No city has been researched. A directory row is not stock and does not authorize a retailer API.
+
+`0003` does not replace `0002_public_read_and_retention.sql`. Observation reads stay security-invoker, the retention purge stays restricted to its owner and `retention_worker`, and community disagreement stays `conflicting`. Retailer gates are unchanged: Best Buy remains PARTIAL, Walmart and Target remain BLOCKED, and GameStop remains UNVERIFIED. No catalog provider listed in the source-access matrix is enabled for import or redistribution.

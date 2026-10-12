@@ -54,3 +54,29 @@ export const VERIFICATION_STATUS = Object.freeze([
 export const FRESHNESS = Object.freeze(["FRESH", "AGING", "STALE", "UNKNOWN"]);
 
 export const CONFIDENCE = Object.freeze(["high", "medium", "low"]);
+
+// Directory / catalog claims. Same four authorization words as inventory sources.
+// Creating a row, a passing fixture, or a search hit does not make a claim VERIFIED.
+export const RECORD_VERIFICATION = AUTH_STATUS;
+
+export const LIFECYCLE_STATUS = Object.freeze(["active", "discontinued", "unknown"]);
+
+export const STORE_RECORD_STATUS = Object.freeze(["active", "retired"]);
+
+export const BUSINESS_KINDS = Object.freeze(["chain_banner", "independent"]);
+
+export const STORE_FORMATS = Object.freeze(["big_box", "specialty_game_store", "other"]);
+
+// Controlled vocabulary for directory imports. These ids do not authorize retailer APIs.
+export const KNOWN_RETAILER_IDS = Object.freeze(["walmart", "target", "gamestop", "bestbuy"]);
+
+export const EVIDENCE_SCOPES = Object.freeze([
+  "record",
+  "address",
+  "coordinates",
+  "set_name",
+  "release_date",
+  "identifier",
+  "website",
+  "phone",
+]);
